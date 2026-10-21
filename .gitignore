@@ -9,3 +9,4 @@ backend/safety_band.db-wal
 .env
 backend/.env
 frontend/.env
+arduino/IndustrialWorkerSafetyBand/IndustrialWorkerSafetyBand.ino

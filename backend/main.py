@@ -629,6 +629,16 @@ def latest(device_id: str = 'ESP32-001', simulated: Optional[bool] = None):
 
 @app.get('/api/readings/history')
 def history(device_id: str = 'ESP32-001', hours: int = Query(24, ge=1, le=168), limit: int = Query(1000, ge=1, le=5000), simulated: Optional[bool] = None):
+    # Special case: device_id='all' returns readings from ALL devices
+    if device_id == 'all':
+        since = iso(datetime.now(timezone.utc) - timedelta(hours=hours))
+        with db() as c:
+            q = 'SELECT r.*, w.name as worker_name FROM readings r LEFT JOIN workers w ON r.device_id = w.device_id WHERE r.timestamp>=?'; args = [since]
+            if simulated is not None: q += ' AND r.simulated=?'; args.append(int(simulated))
+            q += ' ORDER BY r.id DESC LIMIT ?'; args.append(limit)
+            rows = c.execute(q, args).fetchall()
+        return {'data': [rowdict(x) for x in reversed(rows)], 'hours': hours, 'source': 'sqlite'}
+
     # Try InfluxDB first for better time-series performance
     if influx_connected and not simulated:
         influx_data = query_influx_history(device_id, hours, limit)
@@ -638,9 +648,9 @@ def history(device_id: str = 'ESP32-001', hours: int = Query(24, ge=1, le=168), 
     # Fallback to SQLite
     since = iso(datetime.now(timezone.utc) - timedelta(hours=hours))
     with db() as c:
-        q = 'SELECT * FROM readings WHERE device_id=? AND timestamp>=?'; args = [device_id, since]
-        if simulated is not None: q += ' AND simulated=?'; args.append(int(simulated))
-        q += ' ORDER BY id DESC LIMIT ?'; args.append(limit)
+        q = 'SELECT r.*, w.name as worker_name FROM readings r LEFT JOIN workers w ON r.device_id = w.device_id WHERE r.device_id=? AND r.timestamp>=?'; args = [device_id, since]
+        if simulated is not None: q += ' AND r.simulated=?'; args.append(int(simulated))
+        q += ' ORDER BY r.id DESC LIMIT ?'; args.append(limit)
         rows = c.execute(q, args).fetchall()
     return {'data': [rowdict(x) for x in reversed(rows)], 'hours': hours, 'source': 'sqlite'}
 

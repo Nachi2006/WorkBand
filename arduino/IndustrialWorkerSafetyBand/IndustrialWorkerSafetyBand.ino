@@ -24,11 +24,11 @@
 #define MPU           0x68
 
 // ======================== CONFIGURATION ========================
-#define WIFI_SSID        "[WIFI]"
-#define WIFI_PASSWORD    "[PASSWORD]"
-#define MQTT_SERVER      "[IP_ADDRESS]"     // Your PC's Wi-Fi IPv4
+#define WIFI_SSID        "POCO C65"
+#define WIFI_PASSWORD    "Nachi@2006"
+#define MQTT_SERVER      "192.68.56.1"     // Your PC's Wi-Fi IPv4
 #define MQTT_PORT        1883
-#define DEVICE_ID        "[DEVICE_ID]"
+#define DEVICE_ID        "ESP32-001"
 
 // MQTT Topic Hierarchy
 #define TOPIC_TELEMETRY  "workband/telemetry/" DEVICE_ID

@@ -27,10 +27,14 @@ const nav = [
 const fmt = (v, d = 1) => v == null || !Number.isFinite(Number(v)) ? '—' : Number(v).toFixed(d);
 const stamp = v => v ? new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'No reading yet';
 
+// Distinct colors for multi-user charts
+const WORKER_COLORS = ['#d36b6b', '#6c94bc', '#c28a4b', '#8c83ba', '#2e854b', '#e07941', '#5b9bd5', '#c55c8a'];
+
 function App() {
   const [page, setPage] = useState('Overview');
   const [data, setData] = useState(null);
   const [history, setHistory] = useState([]);
+  const [allHistory, setAllHistory] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [device, setDevice] = useState({ status: 'Offline' });
   const [workersData, setWorkersData] = useState({ total_workers: 0, online_workers: 0, total_falls: 0, data: [] });
@@ -52,18 +56,24 @@ function App() {
   const [workerTab, setWorkerTab] = useState('all');
   const [workerSearch, setWorkerSearch] = useState('');
 
+  // Analytics: selected worker for per-user analytics (null = all users)
+  const [analyticsWorker, setAnalyticsWorker] = useState(null);
+  const [workerHistory, setWorkerHistory] = useState([]);
+
   // Initial HTTP fetch
   const load = useCallback(async () => {
     try {
-      const [latest, hist, al, dev, wrk] = await Promise.all([
+      const [latest, hist, allHist, al, dev, wrk] = await Promise.all([
         fetch(`${API}/api/readings/latest?device_id=ESP32-001&simulated=${simulation}`).then(r => r.json()),
         fetch(`${API}/api/readings/history?device_id=ESP32-001&hours=${hours}&simulated=${simulation}`).then(r => r.json()),
+        fetch(`${API}/api/readings/history?device_id=all&hours=${hours}&simulated=${simulation}`).then(r => r.json()),
         fetch(`${API}/api/alerts?limit=100&simulated=${simulation}`).then(r => r.json()),
         fetch(`${API}/api/device/status?device_id=ESP32-001`).then(r => r.json()),
         fetch(`${API}/api/workers`).then(r => r.json())
       ]);
       setData(latest.data);
       setHistory(hist.data || []);
+      setAllHistory(allHist.data || []);
       setAlerts(al.data || []);
       setDevice(dev);
       setWorkersData(wrk);
@@ -206,6 +216,24 @@ function App() {
     }
   };
 
+  // Load per-worker analytics history
+  const loadWorkerAnalytics = async (worker) => {
+    setAnalyticsWorker(worker);
+    try {
+      const res = await fetch(`${API}/api/readings/history?device_id=${worker.device_id}&hours=${hours}&simulated=${simulation}`).then(r => r.json());
+      setWorkerHistory(res.data || []);
+    } catch {
+      setWorkerHistory([]);
+    }
+  };
+
+  // Re-fetch worker analytics when hours change
+  useEffect(() => {
+    if (analyticsWorker) {
+      loadWorkerAnalytics(analyticsWorker);
+    }
+  }, [hours, simulation]);
+
   // Inspect Forensic Proof for an incident
   const openProofDossier = (incident) => {
     setProofIncident(incident);
@@ -292,6 +320,30 @@ function App() {
     return history;
   }, [simulation, simData, history]);
 
+  // Derive unique device IDs and build merged multi-user chart data
+  const { allDeviceIds, allDeviceWorkerMap, mergedAllHistory } = useMemo(() => {
+    const workers = workersData.data || [];
+    const deviceWorkerMap = {};
+    workers.forEach(w => { deviceWorkerMap[w.device_id] = w.name || w.device_id; });
+    const deviceIds = [...new Set(allHistory.map(r => r.device_id))].sort();
+    // If no all-user data, fall back to single device
+    if (deviceIds.length === 0 && history.length > 0) {
+      deviceIds.push('ESP32-001');
+    }
+    // Merge: group by timestamp (rounded to second), each device gets its own column
+    const byTime = {};
+    allHistory.forEach(r => {
+      const ts = r.timestamp;
+      if (!byTime[ts]) byTime[ts] = { timestamp: ts };
+      byTime[ts][`hr_${r.device_id}`] = r.heart_rate;
+      byTime[ts][`spo2_${r.device_id}`] = r.spo2;
+      byTime[ts][`temp_${r.device_id}`] = r.temperature;
+      byTime[ts][`aq_${r.device_id}`] = r.air_quality_adc;
+    });
+    const merged = Object.values(byTime).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    return { allDeviceIds: deviceIds, allDeviceWorkerMap: deviceWorkerMap, mergedAllHistory: merged };
+  }, [allHistory, history, workersData]);
+
   const active = alerts.filter(a => ['Active', 'Acknowledged'].includes(a.status));
   const safety = !shown ? 'Unknown' : shown.fall_detected ? 'Critical' : 
     (shown.heart_rate != null && (shown.heart_rate < 45 || shown.heart_rate > 130) || shown.spo2 != null && shown.spo2 < 90) ? 'Critical' : 
@@ -304,6 +356,7 @@ function App() {
     { label: 'Air quality', value: shown?.air_quality_adc ?? '—', unit: 'ADC', icon: AirVent, tone: 'violet', desc: 'MQ-135 Gas Sensor', key: 'air_quality_adc' }
   ];
 
+  // Single-device chart (for Overview page - single device)
   function chart(key, label, color, unit) {
     return (
       <div className="chart-card">
@@ -317,6 +370,98 @@ function App() {
         <div className="chart">
           <ResponsiveContainer width="100%" height="100%">
             <RLineChart data={shownHistory} margin={{ top: 8, right: 8, left: -24, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e8e8e6" />
+              <XAxis 
+                dataKey="timestamp" 
+                tickFormatter={v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} 
+                tick={{ fontSize: 9, fill: '#9a9a98' }} 
+                axisLine={false} 
+                tickLine={false} 
+                minTickGap={20} 
+              />
+              <YAxis tick={{ fontSize: 9, fill: '#9a9a98' }} axisLine={false} tickLine={false} />
+              <Tooltip labelFormatter={v => new Date(v).toLocaleString()} formatter={v => [`${fmt(v, 1)} ${unit}`, label]} />
+              <Line type="monotone" dataKey={key} stroke={color} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />
+            </RLineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    );
+  }
+
+  // Multi-user chart (for Analytics page - all users overlaid)
+  function multiChart(keyPrefix, label, baseColor, unit, chartData, deviceIds, nameMap) {
+    return (
+      <div className="chart-card">
+        <div className="chart-head">
+          <div>
+            <h3>{label}</h3>
+            <p>All workers · population analytics</p>
+          </div>
+          <span className="chart-unit">{unit}</span>
+        </div>
+        <div className="chart-legend">
+          {deviceIds.map((did, i) => (
+            <span key={did} className="legend-item">
+              <i style={{ background: WORKER_COLORS[i % WORKER_COLORS.length] }} />
+              {nameMap[did] || did}
+            </span>
+          ))}
+        </div>
+        <div className="chart" style={{ height: 175 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <RLineChart data={chartData} margin={{ top: 8, right: 8, left: -24, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e8e8e6" />
+              <XAxis 
+                dataKey="timestamp" 
+                tickFormatter={v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} 
+                tick={{ fontSize: 9, fill: '#9a9a98' }} 
+                axisLine={false} 
+                tickLine={false} 
+                minTickGap={20} 
+              />
+              <YAxis tick={{ fontSize: 9, fill: '#9a9a98' }} axisLine={false} tickLine={false} />
+              <Tooltip 
+                labelFormatter={v => new Date(v).toLocaleString()} 
+                formatter={(v, name) => {
+                  const devId = name.replace(`${keyPrefix}_`, '');
+                  return [`${fmt(v, 1)} ${unit}`, nameMap[devId] || devId];
+                }}
+              />
+              {deviceIds.map((did, i) => (
+                <Line 
+                  key={did} 
+                  type="monotone" 
+                  dataKey={`${keyPrefix}_${did}`} 
+                  stroke={WORKER_COLORS[i % WORKER_COLORS.length]} 
+                  strokeWidth={2} 
+                  dot={false} 
+                  connectNulls={false} 
+                  isAnimationActive={false}
+                  name={`${keyPrefix}_${did}`}
+                />
+              ))}
+            </RLineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    );
+  }
+
+  // Single-worker chart for per-user analytics
+  function workerChart(key, label, color, unit, chartData) {
+    return (
+      <div className="chart-card">
+        <div className="chart-head">
+          <div>
+            <h3>{label}</h3>
+            <p>Individual worker telemetry</p>
+          </div>
+          <span className="chart-unit">{unit}</span>
+        </div>
+        <div className="chart">
+          <ResponsiveContainer width="100%" height="100%">
+            <RLineChart data={chartData} margin={{ top: 8, right: 8, left: -24, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e8e8e6" />
               <XAxis 
                 dataKey="timestamp" 
@@ -716,7 +861,7 @@ function App() {
                         {/* Fall Count Indicator */}
                         <div className={`worker-fall-counter ${fallCount > 0 ? 'alert' : ''}`}>
                           <AlertTriangle size={15}/>
-                          <div>
+                          <div className="fall-counter-text">
                             <strong>{fallCount} {fallCount === 1 ? 'Fall Incident' : 'Falls Logged'}</strong>
                             <span>{fallCount === 0 ? 'Safe record · No falls detected' : 'Requires kinematic review'}</span>
                           </div>
@@ -771,17 +916,17 @@ function App() {
                 </button>
               </div>
               <div className="summary-strip">
-                <div>
-                  <span>Active incidents</span>
-                  <strong>{active.length}</strong>
+                <div className="summary-strip-item">
+                  <span className="summary-label">Active incidents</span>
+                  <strong className="summary-value">{active.length}</strong>
                 </div>
-                <div>
-                  <span>Critical alerts</span>
-                  <strong>{active.filter(a => a.severity === 'critical').length}</strong>
+                <div className="summary-strip-item">
+                  <span className="summary-label">Critical alerts</span>
+                  <strong className="summary-value">{active.filter(a => a.severity === 'critical').length}</strong>
                 </div>
-                <div>
-                  <span>Total safety records</span>
-                  <strong>{alerts.length}</strong>
+                <div className="summary-strip-item">
+                  <span className="summary-label">Total safety records</span>
+                  <strong className="summary-value">{alerts.length}</strong>
                 </div>
               </div>
               <AlertTable alerts={alerts} onAck={ack} onOpenProof={openProofDossier} />
@@ -801,21 +946,130 @@ function App() {
                   ))}
                 </div>
               </div>
-              <div className="charts-grid analytics-charts">
-                {chart('heart_rate', 'Heart rate', '#d36b6b', 'BPM')}
-                {chart('spo2', 'Blood oxygen', '#6c94bc', '%')}
-                {chart('temperature', 'Skin temperature', '#c28a4b', '°C')}
-                {chart('air_quality_adc', 'Air quality · raw ADC', '#8c83ba', 'ADC')}
+
+              {/* ---- Worker Selector for Per-User Analytics ---- */}
+              <div className="analytics-worker-selector">
+                <div className="analytics-selector-header">
+                  <h3>Select Worker for Individual Analytics</h3>
+                  <span className="eyebrow">CLICK A WORKER TO DRILL DOWN · OR VIEW ALL</span>
+                </div>
+                <div className="analytics-worker-pills">
+                  <button 
+                    className={`analytics-worker-pill ${analyticsWorker === null ? 'active' : ''}`}
+                    onClick={() => { setAnalyticsWorker(null); setWorkerHistory([]); }}
+                  >
+                    <Users size={13}/>
+                    <span>All Workers</span>
+                  </button>
+                  {(workersData.data || []).map((w, i) => {
+                    const isSelected = analyticsWorker?.id === w.id;
+                    return (
+                      <button 
+                        key={w.id} 
+                        className={`analytics-worker-pill ${isSelected ? 'active' : ''}`}
+                        onClick={() => loadWorkerAnalytics(w)}
+                      >
+                        <span className="pill-color-dot" style={{ background: WORKER_COLORS[i % WORKER_COLORS.length] }} />
+                        <span>{w.name}</span>
+                        <span className={`pill-status ${w.online ? 'on' : 'off'}`} />
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-              <div className="panel table-panel">
+
+              {/* ---- Population-Wide Analytics (All Users) ---- */}
+              {analyticsWorker === null && (
+                <>
+                  <div className="section-title" style={{ marginTop: 8 }}>
+                    <div>
+                      <span className="eyebrow">POPULATION ANALYTICS</span>
+                      <h2>All Workers · Combined Telemetry</h2>
+                    </div>
+                    <span className="section-note">{allDeviceIds.length} DEVICES · {mergedAllHistory.length} SAMPLES</span>
+                  </div>
+                  <div className="charts-grid analytics-charts">
+                    {multiChart('hr', 'Heart Rate', '#d36b6b', 'BPM', mergedAllHistory, allDeviceIds, allDeviceWorkerMap)}
+                    {multiChart('spo2', 'Blood Oxygen', '#6c94bc', '%', mergedAllHistory, allDeviceIds, allDeviceWorkerMap)}
+                    {multiChart('temp', 'Skin Temperature', '#c28a4b', '°C', mergedAllHistory, allDeviceIds, allDeviceWorkerMap)}
+                    {multiChart('aq', 'Air Quality · Raw ADC', '#8c83ba', 'ADC', mergedAllHistory, allDeviceIds, allDeviceWorkerMap)}
+                  </div>
+                </>
+              )}
+
+              {/* ---- Per-Worker Analytics ---- */}
+              {analyticsWorker !== null && (
+                <>
+                  <div className="section-title" style={{ marginTop: 8 }}>
+                    <div>
+                      <span className="eyebrow">INDIVIDUAL ANALYTICS</span>
+                      <h2>{analyticsWorker.name} · {analyticsWorker.role}</h2>
+                    </div>
+                    <span className="section-note">
+                      {analyticsWorker.device_id} · {analyticsWorker.department} · {workerHistory.length} READINGS
+                    </span>
+                  </div>
+
+                  {/* Worker Summary Stats */}
+                  <div className="workers-stats-strip" style={{ marginBottom: 20 }}>
+                    <div className="stat-card">
+                      <div className="stat-card-top">
+                        <span className="stat-label">Current Heart Rate</span>
+                        <span className="stat-card-icon" style={{ background: '#faeeee', color: '#d36b6b' }}><HeartPulse size={16}/></span>
+                      </div>
+                      <strong className="stat-number" style={{ color: '#d36b6b' }}>
+                        {analyticsWorker.latest_reading?.heart_rate ? `${fmt(analyticsWorker.latest_reading.heart_rate, 0)}` : '—'}
+                        <small style={{ fontSize: 12, color: '#999', marginLeft: 4 }}>BPM</small>
+                      </strong>
+                    </div>
+                    <div className="stat-card">
+                      <div className="stat-card-top">
+                        <span className="stat-label">Blood Oxygen</span>
+                        <span className="stat-card-icon" style={{ background: '#edf3f8', color: '#6c94bc' }}><Waves size={16}/></span>
+                      </div>
+                      <strong className="stat-number" style={{ color: '#6c94bc' }}>
+                        {analyticsWorker.latest_reading?.spo2 ? `${fmt(analyticsWorker.latest_reading.spo2, 0)}%` : '—'}
+                      </strong>
+                    </div>
+                    <div className="stat-card">
+                      <div className="stat-card-top">
+                        <span className="stat-label">Temperature</span>
+                        <span className="stat-card-icon" style={{ background: '#fbf2e7', color: '#c28a4b' }}><Thermometer size={16}/></span>
+                      </div>
+                      <strong className="stat-number" style={{ color: '#c28a4b' }}>
+                        {analyticsWorker.latest_reading?.temperature ? `${fmt(analyticsWorker.latest_reading.temperature, 1)}°C` : '—'}
+                      </strong>
+                    </div>
+                    <div className="stat-card">
+                      <div className="stat-card-top">
+                        <span className="stat-label">Falls Recorded</span>
+                        <span className="stat-card-icon red"><AlertTriangle size={16}/></span>
+                      </div>
+                      <strong className="stat-number">{analyticsWorker.fall_count || 0}</strong>
+                    </div>
+                  </div>
+
+                  <div className="charts-grid analytics-charts">
+                    {workerChart('heart_rate', 'Heart Rate', '#d36b6b', 'BPM', workerHistory)}
+                    {workerChart('spo2', 'Blood Oxygen', '#6c94bc', '%', workerHistory)}
+                    {workerChart('temperature', 'Skin Temperature', '#c28a4b', '°C', workerHistory)}
+                    {workerChart('air_quality_adc', 'Air Quality · Raw ADC', '#8c83ba', 'ADC', workerHistory)}
+                  </div>
+                </>
+              )}
+
+              {/* ---- Readings Log Table ---- */}
+              <div className="panel table-panel" style={{ marginTop: 24 }}>
                 <div className="panel-title">
-                  <h3>Recent readings log</h3>
-                  <span>{shownHistory.length} samples in window</span>
+                  <h3>{analyticsWorker ? `${analyticsWorker.name} readings log` : 'All workers readings log'}</h3>
+                  <span>{(analyticsWorker ? workerHistory : allHistory).length} samples in window</span>
                 </div>
                 <div className="table-wrap">
                   <table>
                     <thead>
                       <tr>
+                        <th>Worker</th>
+                        <th>Device</th>
                         <th>Timestamp</th>
                         <th>Heart rate</th>
                         <th>SpO₂</th>
@@ -825,8 +1079,10 @@ function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {[...shownHistory].reverse().slice(0, 20).map((r, i) => (
+                      {[...(analyticsWorker ? workerHistory : allHistory)].reverse().slice(0, 30).map((r, i) => (
                         <tr key={r.timestamp + i}>
+                          <td><strong>{r.worker_name || '—'}</strong></td>
+                          <td>{r.device_id}</td>
                           <td>{new Date(r.timestamp).toLocaleString()}</td>
                           <td>{fmt(r.heart_rate)} BPM</td>
                           <td>{fmt(r.spo2, 0)}%</td>
@@ -843,7 +1099,7 @@ function App() {
                       ))}
                     </tbody>
                   </table>
-                  {shownHistory.length === 0 && (
+                  {(analyticsWorker ? workerHistory : allHistory).length === 0 && (
                     <div className="empty">No historical readings stored for this time range.</div>
                   )}
                 </div>
